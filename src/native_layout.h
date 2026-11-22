@@ -47,6 +47,12 @@ constexpr uintptr_t kPvSelSetScopeUi=0x6DF6D0;       // [自拟] void(panel, int
 constexpr uintptr_t kPvSelGetPanel=0x6DE400;         // [自拟] uintptr_t(pvSelector + 0x1A50)
 constexpr uintptr_t kPvSelSetPanelPv=0x6DE9F0;       // [自拟] void(panel, int16 pvId)
 constexpr uintptr_t kCustomizeTask=0xCC6F100;        // [自拟] 自定义任务静态本体，+0x78 非空代表处于自定义菜单
+constexpr uintptr_t kCustomizeControllerCtrl=0x67F2B0; // [自拟] uint8_t(controller)，自定义控制器每帧回调
+constexpr uintptr_t kSceneTopMenuChangeScope=0x69A1F0;   // [自拟] void(scene)，TopMenu 切套装范围
+constexpr uintptr_t kSceneModuleChangeScope=0x691270;    // [自拟] void(scene)，Module 切套装范围
+constexpr uintptr_t kSceneHairstyleChangeScope=0x6887B0; // [自拟] void(scene)，Hairstyle 切套装范围
+constexpr uintptr_t kSceneItemChangeScope=0x68C780;      // [自拟] void(scene)，Item 切套装范围
+constexpr uintptr_t kSceneSoundChangeScope=0x697420;     // [自拟] void(scene)，Sound 切套装范围
 constexpr uintptr_t kSceneManagerVtable=0xCC4E38;    // [RTTI] CustomizeSelectorSceneManager 虚表
 constexpr uintptr_t kTaskWaitScreen=0xCC0B530;       // [RTTI] TaskWaitScreen（NOW LOADING 幕布）静态实例
 constexpr uintptr_t kTaskWaitScreenVtable=0xCC2268;  // [RTTI] TaskWaitScreen 虚表
@@ -111,6 +117,7 @@ constexpr uintptr_t kController=0x78;
 }
 
 namespace customize_controller {
+constexpr uintptr_t kSourcePvId=0x08;
 constexpr uintptr_t kOverrideTable=0x10;
 constexpr uintptr_t kHeader=0x968;
 constexpr uintptr_t kSceneManager=0x998;
@@ -119,7 +126,22 @@ constexpr uintptr_t kSceneManager=0x998;
 namespace scene_manager {
 constexpr uintptr_t kTreeHead=0x08;
 constexpr uintptr_t kCurrentNode=0x18;
+constexpr uintptr_t kTargetNode=0x20;
+constexpr uintptr_t kTransition=0x28;
+constexpr int32_t kTransitionIdle=1;
 constexpr uintptr_t kNodeKey=0x20;
+constexpr uintptr_t kNodeScene=0x28;
+}
+
+namespace customize_scene {
+constexpr uintptr_t kController=0x08;
+constexpr uintptr_t kTopMenuState=0x178;
+constexpr uintptr_t kModulePopup=0x60;
+constexpr uintptr_t kModuleState=0x330;
+constexpr uintptr_t kHairstyleState=0x3A0;
+constexpr uintptr_t kItemState=0x300;
+constexpr uintptr_t kSoundState=0x1A8;
+constexpr uintptr_t kStateInternal=0x18;
 }
 
 namespace task_wait_screen {

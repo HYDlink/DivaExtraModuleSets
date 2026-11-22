@@ -24,6 +24,8 @@ using LoadSaveDataFn=void(__fastcall*)(uintptr_t);
 using SaveSaveDataFn=void(__fastcall*)(uintptr_t);
 using CycleCustomizeScopeFn=uint8_t(__fastcall*)();
 using ApplySongOutfitFn=void(__fastcall*)(uintptr_t,int32_t,uintptr_t);
+using CustomizeCtrlFn=uint8_t(__fastcall*)(uintptr_t);
+using SceneChangeScopeFn=void(__fastcall*)(uintptr_t);
 using PvSelSwitchCtrlFn=uint8_t(__fastcall*)(uintptr_t);
 using PvSelSetScopeUiFn=void(__fastcall*)(uintptr_t,int32_t);
 using PvSelApplyOutfitFn=void(__fastcall*)(uintptr_t,int32_t);
@@ -61,6 +63,7 @@ LoadSaveDataFn originalLoadSaveData=nullptr;
 SaveSaveDataFn originalSaveSaveData=nullptr;
 CycleCustomizeScopeFn originalCycleScope=nullptr;
 ApplySongOutfitFn originalApplySongOutfit=nullptr;
+CustomizeCtrlFn originalCustomizeCtrl=nullptr;
 PvSelSwitchCtrlFn originalPvSelCtrl=nullptr;
 PvSelSetScopeUiFn originalPvSelSetScopeUi=nullptr;
 
@@ -78,6 +81,9 @@ struct BridgeState {
     uint64_t slotGeneration=1;
     uint64_t lastUiSlotGeneration=0;
     std::optional<ActiveSlot> pendingJumpSlot;
+    std::optional<ActiveSlot> pendingCustomizeJump;
+    bool pendingDisableAfterCustomizeJump=false;
+    bool executingCustomizeJump=false;
     bool pendingSongSelectRefresh=false;
 
     SlotStore store;
@@ -521,7 +527,12 @@ void __fastcall HookSaveSaveData(uintptr_t save) {
 } // 结束匿名命名空间，导出后三枚 MASM 跳板目标实现。
 
 extern "C" uint8_t __fastcall HookCycleCustomizeScopeImpl() {
-    if(CallIsPlaylistMode()) return 0;
+    bool isExecJump=false;
+    {
+        std::lock_guard lock(State().configMutex);
+        isExecJump=State().executingCustomizeJump && State().pendingCustomizeJump.has_value();
+    }
+    if(!isExecJump && CallIsPlaylistMode()) return 0;
     const uintptr_t save=CallGetSaveData();
     bool delegateVanilla=false;
     bool needWarmup=false;
@@ -529,7 +540,28 @@ extern "C" uint8_t __fastcall HookCycleCustomizeScopeImpl() {
     {
         auto& st=State();
         std::lock_guard lock(st.configMutex);
-        if(!st.settings.enabled) {
+        if(st.executingCustomizeJump && st.pendingCustomizeJump.has_value()) {
+            const ActiveSlot target=*st.pendingCustomizeJump;
+            st.pendingCustomizeJump.reset();
+            const bool disableAfter=st.pendingDisableAfterCustomizeJump;
+            st.pendingDisableAfterCustomizeJump=false;
+            EnsureLoadedLocked(save);
+            needWarmup=st.needSongDefaultsWarmup;
+            if(disableAfter) {
+                st.settings.enabled=false;
+            }
+            if(target!=st.activeSlot) {
+                SyncSaveScopeAndNotify(save,target);
+                st.pendingSongSelectRefresh=true;
+                result=1;
+            } else if(disableAfter) {
+                const int32_t vanillaScope=NativeScopeFor(target);
+                st.expectedNativeScope=vanillaScope;
+                if(save) WriteAt(save+save_offsets::kScope,vanillaScope);
+                ++st.slotGeneration;
+                st.pendingSongSelectRefresh=true;
+            }
+        } else if(!st.settings.enabled) {
             delegateVanilla=true;
         } else {
             EnsureLoadedLocked(save);
@@ -613,6 +645,144 @@ void SafeRefreshPvSelector(uintptr_t base,uintptr_t selector,int32_t pvId,int32_
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+void SafeCallSceneChangeScope(uintptr_t fnAddr,uintptr_t scene) {
+    if(!IsExecutable(fnAddr) || !scene) return;
+    __try {
+        reinterpret_cast<SceneChangeScopeFn>(fnAddr)(scene);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+void CommitPendingCustomizeJumpDirectly(uintptr_t save) {
+    auto& st=State();
+    std::lock_guard lock(st.configMutex);
+    if(!st.pendingCustomizeJump.has_value()) return;
+    const ActiveSlot target=*st.pendingCustomizeJump;
+    st.pendingCustomizeJump.reset();
+    const bool disableAfter=st.pendingDisableAfterCustomizeJump;
+    st.pendingDisableAfterCustomizeJump=false;
+    EnsureLoadedLocked(save);
+    if(disableAfter) st.settings.enabled=false;
+    SyncSaveScopeAndNotify(save,target);
+    st.pendingSongSelectRefresh=true;
+}
+
+uint8_t __fastcall HookCustomizeCtrl(uintptr_t controller) {
+    const uint8_t ret=originalCustomizeCtrl(controller);
+    auto& st=State();
+    uintptr_t base=0;
+    {
+        std::lock_guard lock(st.configMutex);
+        if(!st.pendingCustomizeJump.has_value()) return ret;
+        base=st.base;
+    }
+    if(!base || !controller) return ret;
+
+    uintptr_t waitVtbl=0;
+    int32_t waitDispState=0;
+    const bool waitScreenActive=
+        ReadAt(base+rva::kTaskWaitScreen,waitVtbl)
+        && waitVtbl==base+rva::kTaskWaitScreenVtable
+        && ReadAt(base+rva::kTaskWaitScreen+task_wait_screen::kDispState,waitDispState)
+        && waitDispState!=0;
+    if(waitScreenActive) return ret;
+
+    int32_t mProc=0,sProc=0;
+    uint8_t mShift=0,sShift=0;
+    ReadAt(base+mode_info::kProc,mProc);
+    ReadAt(base+mode_info::kShift,mShift);
+    ReadAt(base+mode_info::kSubProc,sProc);
+    ReadAt(base+mode_info::kSubShift,sShift);
+    if(mProc!=ModeProc::Ctrl || sProc!=ModeProc::Ctrl || mShift!=0 || sShift!=0) return ret;
+
+    uintptr_t overrideTable=0;
+    ReadAt(controller+customize_controller::kOverrideTable,overrideTable);
+    if(overrideTable!=0 || CallIsPlaylistMode()) {
+        std::lock_guard lock(st.configMutex);
+        st.pendingCustomizeJump.reset();
+        st.pendingDisableAfterCustomizeJump=false;
+        return ret;
+    }
+
+    uintptr_t manager=0,mgrVtbl=0,head=0,node=0,target=0;
+    int32_t transition=-1;
+    if(!ReadAt(controller+customize_controller::kSceneManager,manager) || !manager
+        || !ReadAt(manager,mgrVtbl) || mgrVtbl!=base+rva::kSceneManagerVtable
+        || !ReadAt(manager+scene_manager::kTreeHead,head)
+        || !ReadAt(manager+scene_manager::kCurrentNode,node) || !node || node==head
+        || !ReadAt(manager+scene_manager::kTargetNode,target) || target!=head
+        || !ReadAt(manager+scene_manager::kTransition,transition) || transition!=scene_manager::kTransitionIdle) {
+        return ret;
+    }
+
+    int32_t sceneKey=-1;
+    uintptr_t scene=0,sceneController=0;
+    if(!ReadAt(node+scene_manager::kNodeKey,sceneKey)
+        || !ReadAt(node+scene_manager::kNodeScene,scene) || !scene
+        || !ReadAt(scene+customize_scene::kController,sceneController) || sceneController!=controller) {
+        return ret;
+    }
+
+    if(sceneKey==SceneKey::Loading) return ret;
+    if(sceneKey==SceneKey::Finish || sceneKey==SceneKey::Tshirt || sceneKey==SceneKey::Config) {
+        const uintptr_t save=CallGetSaveData();
+        CommitPendingCustomizeJumpDirectly(save);
+        return ret;
+    }
+
+    uintptr_t onChangeScopeRva=0;
+    uintptr_t stateOffset=0;
+    switch(sceneKey) {
+    case SceneKey::TopMenu:
+        onChangeScopeRva=rva::kSceneTopMenuChangeScope;
+        stateOffset=customize_scene::kTopMenuState;
+        break;
+    case SceneKey::Module:
+        onChangeScopeRva=rva::kSceneModuleChangeScope;
+        stateOffset=customize_scene::kModuleState;
+        break;
+    case SceneKey::Hairstyle:
+        onChangeScopeRva=rva::kSceneHairstyleChangeScope;
+        stateOffset=customize_scene::kHairstyleState;
+        break;
+    case SceneKey::Item:
+        onChangeScopeRva=rva::kSceneItemChangeScope;
+        stateOffset=customize_scene::kItemState;
+        break;
+    case SceneKey::Sound:
+        onChangeScopeRva=rva::kSceneSoundChangeScope;
+        stateOffset=customize_scene::kSoundState;
+        break;
+    default:
+        return ret;
+    }
+
+    uintptr_t header=0,stateMgr=0;
+    uint8_t headerVisible=0;
+    int32_t internalState=-1;
+    if(!ReadAt(controller+customize_controller::kHeader,header) || !header
+        || !ReadAt(header,headerVisible) || headerVisible==0
+        || !ReadAt(scene+stateOffset,stateMgr) || !stateMgr
+        || !ReadAt(stateMgr+customize_scene::kStateInternal,internalState) || internalState!=0) {
+        return ret;
+    }
+    if(sceneKey==SceneKey::Module) {
+        int32_t popup=0;
+        if(!ReadAt(scene+customize_scene::kModulePopup,popup) || popup!=-1) return ret;
+    }
+
+    {
+        std::lock_guard lock(st.configMutex);
+        if(!st.pendingCustomizeJump.has_value()) return ret;
+        st.executingCustomizeJump=true;
+    }
+    SafeCallSceneChangeScope(base+onChangeScopeRva,scene);
+    {
+        std::lock_guard lock(st.configMutex);
+        st.executingCustomizeJump=false;
+    }
+    return ret;
+}
+
 uint8_t __fastcall HookPvSelCtrl(uintptr_t selector) {
     const uint8_t ret=originalPvSelCtrl(selector);
     bool doRefresh=false;
@@ -632,7 +802,7 @@ uint8_t __fastcall HookPvSelCtrl(uintptr_t selector) {
             base=st.base;
             doRefresh=true;
             st.pendingSongSelectRefresh=false;
-        } else if(st.pendingSongSelectRefresh && st.settings.enabled) {
+        } else if(st.pendingSongSelectRefresh) {
             uintptr_t controller=0;
             if(st.base) ReadAt(st.base+rva::kCustomizeTask+customize_task::kController,controller);
             if(controller==0) {
@@ -717,7 +887,7 @@ void NativeBridge::Initialize() {
 
     for(auto rvaAddr:{rva::kGetSlotConfig,rva::kGetSlotConfigConst,rva::kGetSoundConfigTarget,
                       rva::kLoadSaveData,rva::kSaveSaveData,rva::kCycleCustomizeScope,
-                      rva::kApplySongOutfit,rva::kPvSelectorSwitchCtrl,rva::kPvSelSetScopeUi}) {
+                      rva::kApplySongOutfit,rva::kCustomizeControllerCtrl,rva::kPvSelectorSwitchCtrl,rva::kPvSelSetScopeUi}) {
         if(!IsExecutable(st.base+rvaAddr)) {
             st.diagnostic="目标 Hook 入口内存不可执行，已停用原生 Hook。";
             Log(st.diagnostic);
@@ -733,6 +903,7 @@ void NativeBridge::Initialize() {
     originalSaveSaveData=reinterpret_cast<SaveSaveDataFn>(st.base+rva::kSaveSaveData);
     originalCycleScope=reinterpret_cast<CycleCustomizeScopeFn>(st.base+rva::kCycleCustomizeScope);
     originalApplySongOutfit=reinterpret_cast<ApplySongOutfitFn>(st.base+rva::kApplySongOutfit);
+    originalCustomizeCtrl=reinterpret_cast<CustomizeCtrlFn>(st.base+rva::kCustomizeControllerCtrl);
     originalPvSelCtrl=reinterpret_cast<PvSelSwitchCtrlFn>(st.base+rva::kPvSelectorSwitchCtrl);
     originalPvSelSetScopeUi=reinterpret_cast<PvSelSetScopeUiFn>(st.base+rva::kPvSelSetScopeUi);
 
@@ -746,6 +917,7 @@ void NativeBridge::Initialize() {
     DetourAttach(reinterpret_cast<PVOID*>(&originalSaveSaveData),HookSaveSaveData);
     DetourAttach(reinterpret_cast<PVOID*>(&originalCycleScope),reinterpret_cast<PVOID>(ThunkCycleCustomizeScope));
     DetourAttach(reinterpret_cast<PVOID*>(&originalApplySongOutfit),reinterpret_cast<PVOID>(ThunkApplySongOutfit));
+    DetourAttach(reinterpret_cast<PVOID*>(&originalCustomizeCtrl),HookCustomizeCtrl);
     DetourAttach(reinterpret_cast<PVOID*>(&originalPvSelCtrl),HookPvSelCtrl);
     DetourAttach(reinterpret_cast<PVOID*>(&originalPvSelSetScopeUi),reinterpret_cast<PVOID>(ThunkPvSelSetScopeUi));
     const LONG commit=DetourTransactionCommit();
@@ -764,7 +936,7 @@ void NativeBridge::Initialize() {
 
     st.inputReady=true;
     st.supported=true;
-    st.diagnostic="已核对 PC 1.03 构建并挂载全部 10 个链式 Hook（含输入隔离与独立存档）。";
+    st.diagnostic="已核对 PC 1.03 构建并挂载全部 11 个链式 Hook（含自定义快速定位、输入隔离与独立存档）。";
     Log(st.diagnostic);
 }
 
@@ -800,28 +972,77 @@ std::string NativeBridge::CurrentLanguage() const {
 
 void NativeBridge::ApplySettings(const ModSettings& settings) {
     auto& st=State();
-    std::lock_guard lock(st.configMutex);
-    const bool wasEnabled=st.settings.enabled;
-    st.settings=settings;
-    st.activeSlot=ClampActiveSlot(st.activeSlot,settings.sharedSlots,settings.songSlots);
-    st.store.SetActiveSlot(st.activeSlot);
     const uintptr_t save=st.supported?CallGetSaveData():0;
-    if(save) EnsureLoadedLocked(save);
-    if(settings.enabled) {
-        st.expectedNativeScope=NativeScopeFor(st.activeSlot);
-        if(save) WriteAt(save+save_offsets::kScope,st.expectedNativeScope);
-        ++st.slotGeneration;
-        if(wasEnabled!=settings.enabled) {
-            st.pendingJumpSlot=st.activeSlot;
+    uintptr_t controller=0;
+    if(st.supported && st.base) ReadAt(st.base+rva::kCustomizeTask+customize_task::kController,controller);
+
+    bool needWarmup=false;
+    {
+        std::lock_guard lock(st.configMutex);
+        if(save) {
+            EnsureLoadedLocked(save);
+            needWarmup=st.needSongDefaultsWarmup;
         }
-    } else if(wasEnabled && save) {
-        // 关闭拓展：立即回退到当前对应的原生有效槽位，不改动后台扩展数据。
-        const int32_t vanillaScope=NativeScopeFor(st.activeSlot);
-        st.expectedNativeScope=vanillaScope;
-        st.activeSlot=FromNativeScope(vanillaScope);
-        WriteAt(save+save_offsets::kScope,vanillaScope);
-        ++st.slotGeneration;
+        const bool wasEnabled=st.settings.enabled && !st.pendingDisableAfterCustomizeJump;
+        const ActiveSlot prevSlot=st.activeSlot;
+        const ActiveSlot clamped=ClampActiveSlot(prevSlot,settings.sharedSlots,settings.songSlots);
+
+        if(controller!=0 && st.supported) {
+            if(settings.enabled) {
+                st.settings=settings;
+                st.pendingDisableAfterCustomizeJump=false;
+                if(clamped!=prevSlot || !wasEnabled) {
+                    // 自定义中必须先保留当前 activeSlot，让 OnChangeScope 提交旧槽修改后再切到目标槽。
+                    st.pendingCustomizeJump=clamped;
+                } else if(st.pendingCustomizeJump) {
+                    *st.pendingCustomizeJump=ClampActiveSlot(*st.pendingCustomizeJump,settings.sharedSlots,settings.songSlots);
+                }
+            } else {
+                const bool pendingExtended=st.pendingCustomizeJump && st.pendingCustomizeJump->IsExtended();
+                const ActiveSlot vanillaSlot=FromNativeScope(NativeScopeFor(prevSlot));
+                st.settings=settings;
+                if(wasEnabled && (prevSlot.IsExtended() || pendingExtended)) {
+                    // 临时保持 enabled 仅此 1 帧，由 OnChangeScope 先提交扩展槽位再平滑重载回原生槽位。
+                    st.settings.enabled=true;
+                    st.pendingCustomizeJump=vanillaSlot;
+                    st.pendingDisableAfterCustomizeJump=true;
+                } else {
+                    st.pendingCustomizeJump.reset();
+                    st.pendingDisableAfterCustomizeJump=false;
+                    st.settings.enabled=false;
+                    st.activeSlot=vanillaSlot;
+                    st.expectedNativeScope=NativeScopeFor(vanillaSlot);
+                    if(save) WriteAt(save+save_offsets::kScope,st.expectedNativeScope);
+                    ++st.slotGeneration;
+                    st.pendingSongSelectRefresh=true;
+                }
+            }
+        } else {
+            st.settings=settings;
+            st.pendingCustomizeJump.reset();
+            st.pendingDisableAfterCustomizeJump=false;
+            if(settings.enabled) {
+                st.activeSlot=clamped;
+                st.store.SetActiveSlot(clamped);
+                st.expectedNativeScope=NativeScopeFor(clamped);
+                if(save) WriteAt(save+save_offsets::kScope,st.expectedNativeScope);
+                ++st.slotGeneration;
+                if(clamped!=prevSlot || !wasEnabled) {
+                    st.pendingSongSelectRefresh=true;
+                }
+            } else if(wasEnabled && save) {
+                // 关闭拓展：立即回退到当前对应的原生有效槽位，不改动后台扩展数据。
+                const int32_t vanillaScope=NativeScopeFor(prevSlot);
+                const ActiveSlot vanillaSlot=FromNativeScope(vanillaScope);
+                st.expectedNativeScope=vanillaScope;
+                st.activeSlot=vanillaSlot;
+                WriteAt(save+save_offsets::kScope,vanillaScope);
+                ++st.slotGeneration;
+                st.pendingSongSelectRefresh=true;
+            }
+        }
     }
+    if(needWarmup) WarmupStoredSongDefaults();
 }
 
 RuntimeSnapshot NativeBridge::ReadSnapshot() const {
@@ -880,6 +1101,12 @@ RuntimeSnapshot NativeBridge::ReadSnapshot() const {
         snap.currentPvId=pvId;
 
         if(controller!=0) {
+            if(pvId<=0) {
+                int32_t sourcePv=0;
+                if(ReadAt(controller+customize_controller::kSourcePvId,sourcePv) && sourcePv>0) {
+                    snap.currentPvId=sourcePv;
+                }
+            }
             uintptr_t overrideTable=0;
             ReadAt(controller+customize_controller::kOverrideTable,overrideTable);
             snap.isPlaylist=(overrideTable!=0 || CallIsPlaylistMode());
@@ -936,12 +1163,30 @@ bool NativeBridge::HasStoredSong(int32_t pvId,uint32_t slotIndex) const {
 
 void NativeBridge::RequestSelectSlot(ActiveSlot slot) {
     auto& st=State();
-    std::lock_guard lock(st.configMutex);
-    const ActiveSlot clamped=ClampActiveSlot(slot,st.settings.sharedSlots,st.settings.songSlots);
     const uintptr_t save=st.supported?CallGetSaveData():0;
-    if(save) EnsureLoadedLocked(save);
-    SyncSaveScopeAndNotify(save,clamped);
-    st.pendingJumpSlot=clamped;
+    uintptr_t controller=0;
+    if(st.supported && st.base) ReadAt(st.base+rva::kCustomizeTask+customize_task::kController,controller);
+    bool needWarmup=false;
+    {
+        std::lock_guard lock(st.configMutex);
+        if(save) {
+            EnsureLoadedLocked(save);
+            needWarmup=st.needSongDefaultsWarmup;
+        }
+        const ActiveSlot clamped=ClampActiveSlot(slot,st.settings.sharedSlots,st.settings.songSlots);
+        if(controller!=0 && st.supported) {
+            if(st.settings.enabled && !st.pendingDisableAfterCustomizeJump) {
+                if(clamped!=st.activeSlot || st.pendingCustomizeJump.has_value()) {
+                    st.pendingCustomizeJump=clamped;
+                    st.pendingDisableAfterCustomizeJump=false;
+                }
+            }
+        } else {
+            SyncSaveScopeAndNotify(save,clamped);
+            st.pendingJumpSlot=clamped;
+        }
+    }
+    if(needWarmup) WarmupStoredSongDefaults();
 }
 
 bool NativeBridge::TriggerManualSave() {
