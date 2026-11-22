@@ -4,6 +4,8 @@ English · [简体中文](README.md)
 
 A non-destructive outfit slot expansion mod for *Hatsune Miku: Project DIVA Mega Mix+* (PC Steam 1.03 / DivaModLoader): expands **Shared Sets up to A–Z (max 26)** and **Song Specific sets up to 1–10 (max 10)**, supports seamless **`F4` / `Shift+F4`** cycling across Song Select, PV Playlist Edit, and Customization menus, and includes an in-game **`F8`** configuration overlay.
 
+![DIVA Extra Module Sets in-game F8 control panel and native Customization banner overlay](docs/images/control-panel-preview.jpg)
+
 ## Features
 
 - **Dual-Scope Slot Expansion**: Independently expand **Shared Sets (`A–Z`, configurable 1–26, vanilla 3)** and **Song Specific slots (`1–10`, configurable 1–10, vanilla 1)**.
@@ -11,7 +13,7 @@ A non-destructive outfit slot expansion mod for *Hatsune Miku: Project DIVA Mega
 - **Authentic Default Characters for Uncustomized Slots**: Untouched Shared slots default to Hatsune Miku Default (`moduleId = 0`), while untouched Song Specific slots automatically resolve each song's default performer modules from the game's PV database (`PvDb`).
 - **Non-Destructive Hiding**: Lowering `shared_slots` or `song_slots` only hides higher slots from the UI and cycle rotation — **your saved outfits and button sounds are never deleted** and immediately reappear if you increase the counts later.
 - **Separate Steam Cloud-Compatible Save (`DivaExtraModuleSets.dat`)**: Vanilla `A/B/C` and `Song Specific 1` continue using the game's native save unmodified. Extended slots are persisted atomically with CRC32 verification to `DivaExtraModuleSets.dat` inside your Steam save folder, syncing with Steam Cloud and leaving your vanilla save untouched if you uninstall.
-- **In-Game Control Panel (`F8`)**: Features Pearl (default) and Classic themes, automatic `en` / `zh-CN` / `ja` localization, one-click jumping to any slot, manual save trigger, and a live enable/disable toggle.
+- **In-Game Control Panel (`F8`)**: Features Pearl (default) and Classic themes, automatic `en` / `zh-CN` / `ja` localization, live one-click slot quick-jump and slot-count sliders across both Song Select and Customization menus, manual save trigger, and a live enable/disable toggle with immediate model/slot refresh.
 - **Luma HDR10 / scRGB Adaptation**: Automatically detects 10-bit / FP16 swapchains and matches ReShade `[Luma]` paper white levels.
 
 ## Installation & Updates
