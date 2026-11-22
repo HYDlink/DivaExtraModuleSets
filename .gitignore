@@ -1,0 +1,28 @@
+# 本项目生成的构建、测试与运行产物。
+/build/
+/artifacts/
+# 按本机有效服装生成的参照表及个人名称；不提交或随包覆盖。
+/module_names.toml
+/module_names_reference.toml
+/scripts/research/__pycache__/
+/.vs/
+/CMakeUserPresets.json
+*.user
+*.log
+
+# 阅读参考的独立上游仓库由来源记录追溯，不纳入本项目发行。
+/third_party/reference/
+
+# 依赖的历史构建目录和本机中间文件不作为源码发行。
+/third_party/vendor/detours/
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.exe
+*.dll
+/tests/runtime/
+/design/*.html
+/third_party/vendor/detours-source/*
+!/third_party/vendor/detours-source/src/
+!/third_party/vendor/detours-source/LICENSE.md
