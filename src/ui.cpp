@@ -316,6 +316,13 @@ void View::DrawSettingsWindow(const RuntimeSnapshot& snap) {
         hdrBackgroundBounds={winPos.x,winPos.y,winPos.x+winSize.x,winPos.y+winSize.y};
         DrawThemedWindowFrame(title);
 
+        // 点击面板窗口外部空白处直接关闭（存在下拉框/弹窗时除外；由宿主输入隔离防止穿透）。
+        if(!ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopup)
+            && ImGui::IsMouseClicked(ImGuiMouseButton_Left)
+            && !ImGui::IsMouseHoveringRect(winPos,{winPos.x+winSize.x,winPos.y+winSize.y},false)) {
+            keepOpen=false;
+        }
+
         // 顶部标签栏：对齐 Pearl 斜切平行四边形规范。
         const float overhang=ThemedTabOverhang(36.0f);
         if(overhang>0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX()+overhang);

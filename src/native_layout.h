@@ -68,10 +68,12 @@ constexpr uintptr_t kSaveSaveData=0x1D8280;          // [DML] void(save)
 constexpr uintptr_t kSaveDirString=0xDA2000;         // [自拟] MSVC std::string，保存当前 Steam 存档目录
 constexpr uintptr_t kSpecialDemoModeFlag=0xCC0FE3E;  // [自拟] 非零时使用临时试玩数组
 constexpr uintptr_t kGetDefaultModuleId=0x1D4F50;    // [自拟] int32_t(int32_t chara) 角色默认模型 ID
+constexpr uintptr_t kGetModuleTable=0x441B60;        // [自拟] uintptr_t() 模型表对象（+0 begin, +8 end, 步长 0xC0）
 constexpr uintptr_t kGetPvDb=0x4BBA20;               // [自拟] uintptr_t() PV 数据库指针
 constexpr uintptr_t kGetPvEntry=0x4BB800;            // [自拟] uintptr_t(pvDb, int32_t pvId)
 constexpr uintptr_t kGetPerformerCount=0x4BCC80;     // [自拟] uint64_t(pvEntry)
 constexpr uintptr_t kGetPerformerChara=0x4BCAB0;     // [自拟] int32_t(pvEntry, int32_t slot)
+constexpr uintptr_t kGetPerformerCostume=0x4BCEE0;   // [自拟] int32_t(pvEntry, int32_t slot) 曲目推荐/默认服装 COS 编号
 
 // ---- 范围切换与游玩应用 ----
 constexpr uintptr_t kCycleCustomizeScope=0x681A90;   // [自拟] uint8_t()，所有自定义子页 F4 共同调用

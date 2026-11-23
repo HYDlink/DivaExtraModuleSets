@@ -34,10 +34,12 @@ using PvSelSetPanelPvFn=void(__fastcall*)(uintptr_t,int32_t);
 using IsPlaylistModeFn=uint8_t(__fastcall*)();
 using GetLanguageDirFn=const char*(__fastcall*)();
 using GetDefaultModuleIdFn=int32_t(__fastcall*)(int32_t);
+using GetModuleTableFn=uintptr_t(__fastcall*)();
 using GetPvDbFn=uintptr_t(__fastcall*)();
 using GetPvEntryFn=uintptr_t(__fastcall*)(uintptr_t,int32_t);
 using GetPerformerCountFn=uint64_t(__fastcall*)(uintptr_t);
 using GetPerformerCharaFn=int32_t(__fastcall*)(uintptr_t,int32_t);
+using GetPerformerCostumeFn=int32_t(__fastcall*)(uintptr_t,int32_t);
 
 extern "C" {
 void* __fastcall ThunkGetSlotConfig(uintptr_t save,int32_t pvId,uint32_t slot);
@@ -235,7 +237,8 @@ std::optional<SlotStore::DefaultModules> ResolveSongDefaultModulesNative(int32_t
     if(!st.supported || !st.base || pvId<=0) return std::nullopt;
     const uintptr_t base=st.base;
     for(const uintptr_t rvaAddr:{rva::kGetPvDb,rva::kGetPvEntry,rva::kGetPerformerCount,
-                                 rva::kGetPerformerChara,rva::kGetDefaultModuleId}) {
+                                 rva::kGetPerformerChara,rva::kGetPerformerCostume,
+                                 rva::kGetModuleTable,rva::kGetDefaultModuleId}) {
         if(!IsExecutable(base+rvaAddr)) return std::nullopt;
     }
     __try {
@@ -246,10 +249,50 @@ std::optional<SlotStore::DefaultModules> ResolveSongDefaultModulesNative(int32_t
         const uint64_t count=std::min<uint64_t>(
             reinterpret_cast<GetPerformerCountFn>(base+rva::kGetPerformerCount)(entry),
             CustomizeSet::kPerformerSlots);
+        const uintptr_t moduleTable=reinterpret_cast<GetModuleTableFn>(base+rva::kGetModuleTable)();
+        uintptr_t modBegin=0,modEnd=0;
+        if(moduleTable) {
+            modBegin=*reinterpret_cast<const uintptr_t*>(moduleTable);
+            modEnd=*reinterpret_cast<const uintptr_t*>(moduleTable+8);
+            if(!modBegin || modEnd<=modBegin || (modEnd-modBegin)%0xC0u!=0 || (modEnd-modBegin)/0xC0u>65536u) {
+                modBegin=modEnd=0;
+            }
+        }
+        // PvEntry +0x98/+0xA0 为演出角色记录向量（PC 1.03 步长 0x44）：
+        // +0x08 为 costume，+0x0C 为 pv_costume[0]（零基；Mod 追加角色如 GUMI 的 pv_costume 可大于 0x1F2）。
+        const uintptr_t perfBegin=*reinterpret_cast<const uintptr_t*>(entry+0x98);
+        const uintptr_t perfEnd=*reinterpret_cast<const uintptr_t*>(entry+0xA0);
+        const bool perfVecValid=perfBegin && perfEnd>perfBegin && (perfEnd-perfBegin)%0x44u==0;
+
+        auto findModuleByCharaAndCos=[&](int32_t chara,int32_t cos) -> int32_t {
+            if(cos<0 || modBegin>=modEnd) return -1;
+            for(uintptr_t cur=modBegin;cur<modEnd;cur+=0xC0u) {
+                if(*reinterpret_cast<const int32_t*>(cur+0x08)==chara
+                    && *reinterpret_cast<const int32_t*>(cur+0x0C)==cos) {
+                    return *reinterpret_cast<const int32_t*>(cur);
+                }
+            }
+            return -1;
+        };
+
         SlotStore::DefaultModules defaults{};
         for(size_t i=0;i<count;++i) {
             const int32_t chara=reinterpret_cast<GetPerformerCharaFn>(base+rva::kGetPerformerChara)(entry,static_cast<int32_t>(i));
-            const int32_t modId=reinterpret_cast<GetDefaultModuleIdFn>(base+rva::kGetDefaultModuleId)(chara);
+            int32_t modId=-1;
+            // 1. 优先使用曲目推荐/默认服装 pv_costume[0]（支持 Mod 追加角色与大于 0x1F2 的扩展 COS 编号）。
+            if(perfVecValid && (perfBegin+i*0x44u+0x10u)<=perfEnd) {
+                const int32_t pvCos=*reinterpret_cast<const int32_t*>(perfBegin+i*0x44u+0x0C);
+                if(pvCos>=0) modId=findModuleByCharaAndCos(chara,pvCos);
+            }
+            // 2. 其次尝试原生 performer costume (+0x08)。
+            if(modId<0) {
+                const int32_t cos=reinterpret_cast<GetPerformerCostumeFn>(base+rva::kGetPerformerCostume)(entry,static_cast<int32_t>(i));
+                if(cos>=0) modId=findModuleByCharaAndCos(chara,cos);
+            }
+            // 3. 最后回退角色默认服装。
+            if(modId<0) {
+                modId=reinterpret_cast<GetDefaultModuleIdFn>(base+rva::kGetDefaultModuleId)(chara);
+            }
             defaults[i]=modId>=0?modId:0;
         }
         return defaults;
