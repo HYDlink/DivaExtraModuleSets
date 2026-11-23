@@ -102,8 +102,73 @@ void SlotStore::SetActiveSlot(ActiveSlot slot) {
     }
 }
 
+namespace {
+int32_t ReadI32Le(const uint8_t* ptr,size_t offset) {
+    int32_t v=0;
+    std::memcpy(&v,ptr+offset,sizeof(v));
+    return v;
+}
+
+bool HasShifted12ByteSoundSignature(const uint8_t* soundBytes) {
+    // 游戏原版 0x1401DA7A0 在 +0x1C/+0x20/+0x24/+0x28 写入初始键位 (33, 4, 39, 2)。
+    // 旧版 HookLoadSaveData 误把 SaveDataContainer* 当成 SaveData*（前偏 0x0C 字节），
+    // 导致该特征整体右移 12 字节至 +0x28/+0x2C/+0x30/+0x34，且前两项混入 scope 与 VP 点数。
+    const bool shiftedSig=
+        ReadI32Le(soundBytes,0x28)==33
+        && ReadI32Le(soundBytes,0x2C)==4
+        && ReadI32Le(soundBytes,0x30)==39
+        && ReadI32Le(soundBytes,0x34)==2;
+    const bool normalSig=
+        ReadI32Le(soundBytes,0x1C)==33
+        && ReadI32Le(soundBytes,0x20)==4
+        && ReadI32Le(soundBytes,0x24)==39
+        && ReadI32Le(soundBytes,0x28)==2;
+    return shiftedSig && !normalSig;
+}
+}
+
+bool SlotStore::IsCorruptedSoundBlock(const uint8_t* soundBytes) {
+    if(!soundBytes) return true;
+    if(HasShifted12ByteSoundSignature(soundBytes)) return true;
+    for(size_t i=0;i<6;++i) {
+        const int32_t id=ReadI32Le(soundBytes,i*4);
+        if(id<0 || id>=10000) return true;
+    }
+    return false;
+}
+
+bool SlotStore::SanitizeSoundBlock(uint8_t* soundBytes,const uint8_t* defaultTemplate) {
+    if(!soundBytes) return false;
+    const bool templateValid=defaultTemplate && !IsCorruptedSoundBlock(defaultTemplate);
+    if(HasShifted12ByteSoundSignature(soundBytes)) {
+        if(templateValid) std::memcpy(soundBytes,defaultTemplate,CustomizeSet::kSoundBytes);
+        else std::memset(soundBytes,0,CustomizeSet::kSoundBytes);
+        return true;
+    }
+    bool modified=false;
+    for(size_t i=0;i<6;++i) {
+        const int32_t id=ReadI32Le(soundBytes,i*4);
+        if(id<0 || id>=10000) {
+            int32_t fallback=0;
+            if(templateValid) {
+                const int32_t tplId=ReadI32Le(defaultTemplate,i*4);
+                if(tplId>=0 && tplId<10000) fallback=tplId;
+            }
+            std::memcpy(soundBytes+i*4,&fallback,sizeof(fallback));
+            modified=true;
+        }
+    }
+    return modified;
+}
+
+bool SlotStore::SanitizeSoundInPlace(uint8_t* soundBytes) const {
+    if(!soundBytes) return false;
+    std::lock_guard lock(mutex_);
+    return SanitizeSoundBlock(soundBytes,hasDefaultSound_?defaultSound_.data():nullptr);
+}
+
 void SlotStore::SetDefaultSoundTemplate(const uint8_t* soundBytes) {
-    if(!soundBytes) return;
+    if(!soundBytes || IsCorruptedSoundBlock(soundBytes)) return;
     std::lock_guard lock(mutex_);
     std::memcpy(defaultSound_.data(),soundBytes,CustomizeSet::kSoundBytes);
     hasDefaultSound_=true;
@@ -318,22 +383,38 @@ bool SlotStore::Deserialize(const std::vector<uint8_t>& bytes) {
         static_cast<uint64_t>(header.songCount)*songStride;
     if(requiredBytes>payloadSize) return false;
 
+    bool hasTplSnapshot=false;
+    std::array<uint8_t,CustomizeSet::kSoundBytes> tplSnapshot{};
+    {
+        std::lock_guard lock(mutex_);
+        hasTplSnapshot=hasDefaultSound_;
+        if(hasTplSnapshot) tplSnapshot=defaultSound_;
+    }
+    const uint8_t* soundTpl=hasTplSnapshot?tplSnapshot.data():nullptr;
+
     std::map<uint32_t,CustomizeSet> loadedShared;
     std::map<SongSlotKey,CustomizeSet> loadedSong;
     size_t cursor=payloadOffset;
     const size_t copyBytes=std::min<size_t>(header.setByteSize,sizeof(CustomizeSet));
-    const auto sanitizeLegacyModules=[](CustomizeSet& set) {
+    bool repairedAny=false;
+    const auto sanitizeLegacySet=[&](CustomizeSet& set) {
         for(auto& m:set.modules) {
-            if(m.moduleId<0) m.moduleId=0;
+            if(m.moduleId<0) {
+                m.moduleId=0;
+                repairedAny=true;
+            }
+        }
+        if(SanitizeSoundBlock(set.sound,soundTpl)) {
+            repairedAny=true;
         }
     };
     for(uint32_t i=0;i<header.sharedCount;++i) {
         SharedRecordHeader rh{};
         std::memcpy(&rh,bytes.data()+cursor,sizeof(rh));
         cursor+=sizeof(rh);
-        CustomizeSet set=CustomizeSet::CreateDefault(hasDefaultSound_?defaultSound_.data():nullptr);
+        CustomizeSet set=CustomizeSet::CreateDefault(soundTpl);
         std::memcpy(&set,bytes.data()+cursor,copyBytes);
-        sanitizeLegacyModules(set);
+        sanitizeLegacySet(set);
         cursor+=header.setByteSize;
         if(rh.slotIndex>=3 && rh.slotIndex<kMaxSharedSlots) loadedShared.emplace(rh.slotIndex,set);
     }
@@ -341,9 +422,9 @@ bool SlotStore::Deserialize(const std::vector<uint8_t>& bytes) {
         SongRecordHeader rh{};
         std::memcpy(&rh,bytes.data()+cursor,sizeof(rh));
         cursor+=sizeof(rh);
-        CustomizeSet set=CustomizeSet::CreateDefault(hasDefaultSound_?defaultSound_.data():nullptr);
+        CustomizeSet set=CustomizeSet::CreateDefault(soundTpl);
         std::memcpy(&set,bytes.data()+cursor,copyBytes);
-        sanitizeLegacyModules(set);
+        sanitizeLegacySet(set);
         cursor+=header.setByteSize;
         if(rh.pvId>0 && rh.slotIndex>=1 && rh.slotIndex<kMaxSongSlots) {
             loadedSong.emplace(SongSlotKey{rh.pvId,rh.slotIndex},set);
@@ -355,7 +436,7 @@ bool SlotStore::Deserialize(const std::vector<uint8_t>& bytes) {
     songSets_=std::move(loadedSong);
     active_.kind=header.activeKind==static_cast<uint8_t>(SlotKind::Song)?SlotKind::Song:SlotKind::Shared;
     active_.index=std::clamp(header.activeIndex,0,active_.kind==SlotKind::Shared?kMaxSharedSlots-1:kMaxSongSlots-1);
-    dirty_=false;
+    dirty_=repairedAny;
     return true;
 }
 

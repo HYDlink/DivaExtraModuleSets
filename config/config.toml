@@ -1,6 +1,6 @@
 enabled = true
 name = "DIVA Extra Module Sets"
 description = "Expand Shared Set (A-Z) and Song Specific (1-10) outfit slots with Steam Cloud .dat persistence. Press F8 to configure."
-version = "0.1.0"
+version = "0.1.2"
 author = "DivaExtraModuleSets contributors"
 dll = ["DivaExtraModuleSets.dll"]

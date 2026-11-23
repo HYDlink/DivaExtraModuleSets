@@ -191,10 +191,16 @@ void SeedDefaultSoundFromSave(uintptr_t save) {
     std::array<uint8_t,CustomizeSet::kSoundBytes> sound{};
     SIZE_T got=0;
     if(ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<const void*>(save+save_offsets::kDefaultSound),sound.data(),sound.size(),&got) && got==sound.size()) {
+        if(SlotStore::IsCorruptedSoundBlock(sound.data())) {
+            EmitLog("警告：检测到默认按键音模板异常，已忽略该次模板采样以避免污染扩展槽位。");
+            return;
+        }
         State().store.SetDefaultSoundTemplate(sound.data());
         std::memcpy(State().fallbackSound.data(),sound.data(),sound.size());
     }
 }
+
+void ScheduleBackgroundSave();
 
 void EnsureLoadedLocked(uintptr_t save) {
     if(State().saveLoaded) return;
@@ -212,6 +218,10 @@ void EnsureLoadedLocked(uintptr_t save) {
             State().expectedNativeScope=NativeScopeFor(State().activeSlot);
             WriteAt(save+save_offsets::kScope,State().expectedNativeScope);
             ++State().slotGeneration;
+        }
+        if(State().store.IsDirty()) {
+            EmitLog("已自动修复扩展存档中异常的旧版按键音数据（服装搭配已完整保留），将后台写回。");
+            ScheduleBackgroundSave();
         }
         EmitLog("已从云存档文件读取扩展槽位："+Utf8(filePath.wstring()));
     } else {
@@ -463,9 +473,13 @@ extern "C" void* __fastcall HookGetSoundConfigImpl(uintptr_t save,int32_t pvId,c
         if(st.settings.enabled && active.IsExtended() && (active.kind==SlotKind::Shared || pvId>0)) {
             EnsureLoadedLocked(save);
             needWarmup=st.needSongDefaultsWarmup;
-            customResult=(active.kind==SlotKind::Shared)
-                ? static_cast<void*>(st.store.GetOrCreateSharedSound(static_cast<uint32_t>(active.index)))
-                : static_cast<void*>(st.store.GetOrCreateSongSound(pvId,static_cast<uint32_t>(active.index)));
+            uint8_t* soundPtr=(active.kind==SlotKind::Shared)
+                ? st.store.GetOrCreateSharedSound(static_cast<uint32_t>(active.index))
+                : st.store.GetOrCreateSongSound(pvId,static_cast<uint32_t>(active.index));
+            if(soundPtr) {
+                st.store.SanitizeSoundInPlace(soundPtr);
+                customResult=soundPtr;
+            }
             ScheduleBackgroundSave();
         }
     }
@@ -475,8 +489,11 @@ extern "C" void* __fastcall HookGetSoundConfigImpl(uintptr_t save,int32_t pvId,c
 }
 
 namespace {
-void __fastcall HookLoadSaveData(uintptr_t save) {
-    originalLoadSaveData(save);
+void __fastcall HookLoadSaveData(uintptr_t saveContainer) {
+    originalLoadSaveData(saveContainer);
+    // LoadSaveData(0x1D7FB0) 传入的是 SaveDataContainer*（比 GetSaveData() 返回的 SaveData* 小 0x0C 字节），
+    // 绝不可直接对其施加 save_offsets::* 偏移，必须通过 CallGetSaveData() 获取真实 SaveData*。
+    const uintptr_t save=CallGetSaveData();
     if(!save) return;
     bool needWarmup=false;
     {
@@ -501,16 +518,17 @@ void __fastcall HookLoadSaveData(uintptr_t save) {
     if(needWarmup) WarmupStoredSongDefaults();
 }
 
-void __fastcall HookSaveSaveData(uintptr_t save) {
+void __fastcall HookSaveSaveData(uintptr_t saveContainer) {
+    const uintptr_t save=CallGetSaveData();
     {
         auto& st=State();
         std::lock_guard lock(st.configMutex);
         if(save && st.settings.enabled) {
-            // 保证写入原生存档的 scope 值始终合法（0..3）。
+            // 保证写入原生存档的 scope 值始终合法（0..3），且写入真实 SaveData*（避免破坏共通套装 C 尾部内存）。
             WriteAt(save+save_offsets::kScope,NativeScopeFor(st.activeSlot));
         }
     }
-    originalSaveSaveData(save);
+    originalSaveSaveData(saveContainer);
     auto& st=State();
     std::lock_guard lock(st.configMutex);
     const fs::path path=ResolveSaveFilePath();
@@ -788,13 +806,19 @@ uint8_t __fastcall HookPvSelCtrl(uintptr_t selector) {
     bool doRefresh=false;
     uintptr_t base=0;
     int32_t nativeScope=0;
+    bool hasPendingJump=false;
+    {
+        auto& st=State();
+        std::lock_guard lock(st.configMutex);
+        hasPendingJump=st.pendingJumpSlot.has_value() && st.settings.enabled;
+    }
+    const uintptr_t save=hasPendingJump?CallGetSaveData():0;
     {
         auto& st=State();
         std::lock_guard lock(st.configMutex);
         if(st.pendingJumpSlot && st.settings.enabled) {
             const ActiveSlot jump=*st.pendingJumpSlot;
             st.pendingJumpSlot.reset();
-            const uintptr_t save=CallGetSaveData();
             EnsureLoadedLocked(save);
             const ActiveSlot clamped=ClampActiveSlot(jump,st.settings.sharedSlots,st.settings.songSlots);
             SyncSaveScopeAndNotify(save,clamped);
@@ -1191,8 +1215,8 @@ void NativeBridge::RequestSelectSlot(ActiveSlot slot) {
 
 bool NativeBridge::TriggerManualSave() {
     auto& st=State();
-    std::lock_guard lock(st.configMutex);
     const uintptr_t save=st.supported?CallGetSaveData():0;
+    std::lock_guard lock(st.configMutex);
     if(save) EnsureLoadedLocked(save);
     const fs::path path=ResolveSaveFilePath();
     if(path.empty()) return false;

@@ -103,6 +103,9 @@ public:
     void SetActiveSlot(ActiveSlot slot);
 
     void SetDefaultSoundTemplate(const uint8_t* soundBytes);
+    static bool IsCorruptedSoundBlock(const uint8_t* soundBytes);
+    static bool SanitizeSoundBlock(uint8_t* soundBytes,const uint8_t* defaultTemplate);
+    bool SanitizeSoundInPlace(uint8_t* soundBytes) const;
     void SetSongDefaultModules(int32_t pvId,const DefaultModules& defaultModules);
     std::vector<int32_t> ListStoredSongPvIds() const;
 

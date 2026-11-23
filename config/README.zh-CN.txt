@@ -1,4 +1,4 @@
-DivaExtraModuleSets — 服装搭配槽位拓展 Mod (v0.1.0)
+DivaExtraModuleSets — 服装搭配槽位拓展 Mod (v0.1.2)
 ================================================
 
 【功能说明】

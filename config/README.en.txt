@@ -1,4 +1,4 @@
-DivaExtraModuleSets — Outfit Slot Expander Mod (v0.1.0)
+DivaExtraModuleSets — Outfit Slot Expander Mod (v0.1.2)
 ==========================================================
 
 Features:

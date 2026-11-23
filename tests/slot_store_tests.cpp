@@ -246,6 +246,67 @@ int main() {
         }
     }
 
+    // 6. 旧版 12 字节错位按键音污染检测、拒绝污染模板与历史 .dat 无损自愈测试
+    {
+        auto writeI32=[](uint8_t* dst,size_t off,int32_t val) {
+            std::memcpy(dst+off,&val,sizeof(val));
+        };
+        auto readI32=[](const uint8_t* src,size_t off) {
+            int32_t val=0;
+            std::memcpy(&val,src+off,sizeof(val));
+            return val;
+        };
+
+        uint8_t validTpl[CustomizeSet::kSoundBytes]{};
+        writeI32(validTpl,0x00,0);
+        writeI32(validTpl,0x04,0);
+        writeI32(validTpl,0x1C,33);
+        writeI32(validTpl,0x20,4);
+        writeI32(validTpl,0x24,39);
+        writeI32(validTpl,0x28,2);
+        CHECK(!SlotStore::IsCorruptedSoundBlock(validTpl));
+
+        // 构造精确复现旧版 HookLoadSaveData 偏移 -0x0C 污染的 sound 块：(scope=3, VP=294510, 0, ...) + 右移 12 字节
+        uint8_t shiftedBad[CustomizeSet::kSoundBytes]{};
+        writeI32(shiftedBad,0x00,3);
+        writeI32(shiftedBad,0x04,294510);
+        writeI32(shiftedBad,0x08,0);
+        std::memcpy(shiftedBad+0x0C,validTpl,CustomizeSet::kSoundBytes-0x0C);
+        CHECK(SlotStore::IsCorruptedSoundBlock(shiftedBad));
+
+        // SetDefaultSoundTemplate 必须拒绝损坏模板
+        SlotStore store;
+        store.SetDefaultSoundTemplate(validTpl);
+        store.SetDefaultSoundTemplate(shiftedBad);
+
+        // 构造包含损坏按键音的历史 .dat，验证反序列化后按键音自愈、服装完整保留且标记 dirty
+        auto* m=store.GetOrCreateSharedModule(5,0);
+        m->moduleId=123;
+        auto* snd=store.GetOrCreateSharedSound(5);
+        std::memcpy(snd,shiftedBad,CustomizeSet::kSoundBytes);
+        const auto badBytes=store.Serialize();
+
+        SlotStore repaired;
+        repaired.SetDefaultSoundTemplate(validTpl);
+        CHECK(repaired.Deserialize(badBytes));
+        CHECK(repaired.IsDirty());
+        const auto* repMod=repaired.FindSharedModule(5,0);
+        CHECK(repMod && repMod->moduleId==123);
+        const auto* repSnd=repaired.FindSharedSound(5);
+        CHECK(repSnd && std::memcmp(repSnd,validTpl,CustomizeSet::kSoundBytes)==0);
+
+        // 仅单个音效 ID 越界时，仅修复越界项，保留合法项
+        uint8_t partialBad[CustomizeSet::kSoundBytes]{};
+        std::memcpy(partialBad,validTpl,CustomizeSet::kSoundBytes);
+        writeI32(partialBad,0x00,2);
+        writeI32(partialBad,0x04,294510);
+        CHECK(SlotStore::IsCorruptedSoundBlock(partialBad));
+        CHECK(SlotStore::SanitizeSoundBlock(partialBad,validTpl));
+        CHECK(!SlotStore::IsCorruptedSoundBlock(partialBad));
+        CHECK(readI32(partialBad,0x00)==2);
+        CHECK(readI32(partialBad,0x04)==0);
+    }
+
     fs::remove_all(tempDir,ec);
     std::cout<<"SlotStoreTests: all assertions passed.\n";
     return 0;
